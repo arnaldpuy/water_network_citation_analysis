@@ -1,0 +1,181 @@
+---
+title: "Network Citation Analysis"
+subtitle: "R code"
+author: "Arnald Puy"
+header-includes:
+  - \usepackage[font=footnotesize]{caption}
+  - \usepackage{dirtytalk}
+  - \usepackage{booktabs}
+  - \usepackage{tabulary}
+  - \usepackage{enumitem}
+  - \usepackage{lmodern}
+  - \usepackage{amsmath}
+  - \usepackage{mathtools}
+  - \usepackage[T1]{fontenc}
+  - \usepackage{tikz}
+output:
+  pdf_document:
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+    keep_tex: true
+  word_document:
+    toc: no
+    toc_depth: '2'
+  html_document:
+    keep_md: true
+link-citations: yes
+fontsize: 11pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dev = "tikz", cache = TRUE)
+```
+
+\newpage
+
+# Preliminary 
+
+```{r, results="hide", message=FALSE, warning=FALSE, cache=FALSE}
+
+# PRELIMINARY FUNCTIONS ########################################################
+
+sensobol::load_packages(c("sensobol", "data.table", "tidyverse", "janitor", 
+                          "igraph", "ggraph", "tidygraph", "cowplot", "viridis", 
+                          "wesanderson", "parallel", "doParallel", "tm"))
+
+# Custom theme for plots
+theme_AP <- function() {
+  theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.background = element_rect(fill = "transparent",
+                                           color = NA),
+          legend.key = element_rect(fill = "transparent",
+                                    color = NA), 
+          strip.background = element_rect(fill = "white"), 
+          legend.margin = margin(0.5, 0.1, 0.1, 0.1),
+          legend.box.margin = margin(0.2,-4,-7,-7), 
+          plot.margin = margin(3, 4, 0, 4), 
+          legend.text = element_text(size = 8), 
+          axis.title = element_text(size = 10),
+          legend.key.width = unit(0.4, "cm"), 
+          legend.key.height = unit(0.4, "cm"), 
+          legend.title = element_text(size = 9)) 
+}
+
+# Define color palette
+selected_wesanderson <- "Chevalier1"
+```
+
+```{r dimensions_data}
+
+water.models <- c("WaterGAP", "PCR-GLOBWB", "LPJmL", "CLM4.5", "DBHM", 
+                  "TOPMODEL", "H08", "JULES-W1", "MPI-HM", "VIC", "SWAT", 
+                  "GR4J", "HYPE", "HBV", "MATSIRO", "SACRAMENTO", "MHM", 
+                  "CWatM", "ORCHIDEE")
+
+dt <- list()
+
+for (i in 1:length(water.models)) {
+  
+  dt[[i]] <- fread(paste(water.models[[i]], ".csv", sep = ""), skip = 1) %>%
+    clean_names() %>%
+    data.table()
+  
+}
+
+names(dt) <- water.models
+dt.water <- rbindlist(dt, idcol = "Model")
+
+wos.dt <- fread("final.dt.csv")
+wos.titles <- wos.dt[Model %in% water.models]
+
+# REMOVE DUPLICATED REFERENCES #################################################
+
+# Number of papers in more than one model
+n_occur <- data.frame(table(dt.water$publication_id))
+papers_repeated <- data.table(n_occur[n_occur$Freq > 1,])
+length(papers_repeated$Var1) # number of repeated papers
+
+# Fraction of repeated papers over the total
+length(papers_repeated$Var1) / nrow(dt.water)
+
+# How many papers are repeated twice, three times, etc...
+papers_repeated[, .(N.repeated.papers = .N), Freq]
+
+# Extract which papers are repeated for which model
+dt.sample.repeated <- dt.water[publication_id %in% papers_repeated$Var1] %>%
+  .[, .(publication_id, Model, title, source_title_anthology_title)] %>%
+  .[order(publication_id)]
+
+dt.sample.repeated
+
+# Randomly retrieve only one of the repeated studies per model
+set.seed(6)
+dt.no.repeated <- dt.sample.repeated[,.SD[sample(.N, min(1,.N))], publication_id]
+
+# Setkey to filter and retrieve
+res <- setkey(dt.water, publication_id, Model) %>%
+  .[J(dt.no.repeated$publication_id, dt.no.repeated$Model)]
+
+# Make the dataset without repeated papers across models
+final.dt <- rbind(res, dt.water[!publication_id %in% papers_repeated$Var1])
+
+# Check which papers do not have cited bibliography metadata and exclude them
+final.dt <- final.dt[, empty_cited_references:= grepl("^\\s*$", cited_references)] %>%
+  .[empty_cited_references == FALSE] %>%
+  # Filter dataset to ensure all titles use a water model
+  .[tolower(.$title) %in% wos.titles$title.large]
+
+# Check the WOS and the Dimensions dataset
+wos.dimensions <- merge(wos.dt[Model %in% water.models] %>%
+  .[, .(WOS = .N), Model], 
+  final.dt[, .(Dimensions = .N), Model], 
+  by = "Model")
+
+wos.dimensions[order(-Dimensions)]
+
+# PLOT DIFFERENCES BETWEEN WOS AND DIMENSIONS ##################################
+
+plot.models <- wos.dimensions %>%
+  melt(., measure.vars = c("WOS", "Dimensions")) %>%
+  ggplot(., aes(reorder(Model, value), value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  coord_flip() +
+  scale_fill_manual(name = "Database", 
+                    values = wes_palette(name = selected_wesanderson, 2)) +
+  labs(y = "Count", x = "") +
+  theme_AP() +
+  theme(legend.position = c(0.73, 0.2))
+
+plot.models
+
+wos.dimensions.dt <- wos.dimensions %>%
+  melt(., measure.vars = c("WOS", "Dimensions"), variable.name = "dataset") %>%
+  .[, .(total = sum(value)), dataset]
+
+wos.dimensions.dt
+
+plot.databases <- wos.dimensions.dt %>%
+  ggplot(., aes(dataset, total, fill = dataset)) +
+  geom_bar(stat = "identity", color = "black") +
+  scale_fill_manual(name = "Database", 
+                    values = wes_palette(name = selected_wesanderson, 2)) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
+  labs(x = "", y = "Count") +
+  theme_AP() + 
+  theme(legend.position = "none")
+
+plot.databases
+
+```
+
+```{r plot_dimensions, dependson="dimensions_data", fig.height=2.5, fig.width=4.5}
+
+# MERGE AND PLOT ###############################################################
+
+plot_grid(plot.models, plot.databases, ncol = 2, rel_widths = c(0.65, 0.35), 
+          labels = "auto")
+```
