@@ -30,6 +30,7 @@ fontsize: 11pt
 ---
 
 ```{r setup, include=FALSE}
+
 knitr::opts_chunk$set(echo = TRUE, dev = "tikz", cache = TRUE)
 ```
 
@@ -37,13 +38,14 @@ knitr::opts_chunk$set(echo = TRUE, dev = "tikz", cache = TRUE)
 
 # Preliminary 
 
-```{r, results="hide", message=FALSE, warning=FALSE, cache=FALSE}
+```{r preliminary, results="hide", message=FALSE, warning=FALSE, cache=FALSE}
 
 # PRELIMINARY FUNCTIONS ########################################################
 
 sensobol::load_packages(c("sensobol", "data.table", "tidyverse", "janitor", 
                           "igraph", "ggraph", "tidygraph", "cowplot", "viridis", 
-                          "wesanderson", "parallel", "doParallel", "tm"))
+                          "wesanderson", "parallel", "doParallel", "tm", 
+                          "benchmarkme"))
 
 # Custom theme for plots
 theme_AP <- function() {
@@ -59,10 +61,10 @@ theme_AP <- function() {
           legend.box.margin = margin(0.2,-4,-7,-7), 
           plot.margin = margin(3, 4, 0, 4), 
           legend.text = element_text(size = 8), 
-          axis.title = element_text(size = 10),
+          axis.title = element_text(size = 8.5),
           legend.key.width = unit(0.4, "cm"), 
           legend.key.height = unit(0.4, "cm"), 
-          legend.title = element_text(size = 9)) 
+          legend.title = element_text(size = 8.5)) 
 }
 
 # Define color palette
@@ -70,6 +72,8 @@ selected_wesanderson <- "Chevalier1"
 ```
 
 ```{r dimensions_data}
+
+# DIMENSIONS DATA ##############################################################
 
 water.models <- c("WaterGAP", "PCR-GLOBWB", "LPJmL", "CLM4.5", "DBHM", 
                   "TOPMODEL", "H08", "JULES-W1", "MPI-HM", "VIC", "SWAT", 
@@ -88,6 +92,7 @@ for (i in 1:length(water.models)) {
 
 names(dt) <- water.models
 dt.water <- rbindlist(dt, idcol = "Model")
+rm(dt)
 
 wos.dt <- fread("final.dt.csv")
 wos.titles <- wos.dt[Model %in% water.models]
@@ -127,7 +132,8 @@ final.dt <- rbind(res, dt.water[!publication_id %in% papers_repeated$Var1])
 final.dt <- final.dt[, empty_cited_references:= grepl("^\\s*$", cited_references)] %>%
   .[empty_cited_references == FALSE] %>%
   # Filter dataset to ensure all titles use a water model
-  .[tolower(.$title) %in% wos.titles$title.large]
+  .[tolower(.$title) %in% wos.titles$title.large] %>%
+  setnames(., "authors", "from.authors")
 
 # Check the WOS and the Dimensions dataset
 wos.dimensions <- merge(wos.dt[Model %in% water.models] %>%
@@ -136,6 +142,9 @@ wos.dimensions <- merge(wos.dt[Model %in% water.models] %>%
   by = "Model")
 
 wos.dimensions[order(-Dimensions)]
+```
+
+```{r plot_dimensions, dependson="dimensions_data"}
 
 # PLOT DIFFERENCES BETWEEN WOS AND DIMENSIONS ##################################
 
@@ -148,7 +157,7 @@ plot.models <- wos.dimensions %>%
                     values = wes_palette(name = selected_wesanderson, 2)) +
   labs(y = "Count", x = "") +
   theme_AP() +
-  theme(legend.position = c(0.73, 0.2))
+  theme(legend.position = c(0.8, 0.3))
 
 plot.models
 
@@ -163,19 +172,222 @@ plot.databases <- wos.dimensions.dt %>%
   geom_bar(stat = "identity", color = "black") +
   scale_fill_manual(name = "Database", 
                     values = wes_palette(name = selected_wesanderson, 2)) +
-  scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
   labs(x = "", y = "Count") +
   theme_AP() + 
   theme(legend.position = "none")
 
 plot.databases
-
 ```
 
-```{r plot_dimensions, dependson="dimensions_data", fig.height=2.5, fig.width=4.5}
+```{r merge_plot_dimensions, dependson="plot_dimensions", fig.height=2.5, fig.width=5}
 
-# MERGE AND PLOT ###############################################################
+# MERGE PLOTS ##################################################################
 
 plot_grid(plot.models, plot.databases, ncol = 2, rel_widths = c(0.65, 0.35), 
           labels = "auto")
+```
+
+```{r extract_citations, dependson="dimensions_data"}
+
+# EXTRACT REFERENCES ###########################################################
+
+setnames(final.dt, c("Model", "publication_id"), c("citing_model", "citing_id"))
+
+column_names <- c("authors",
+                  "author_id",
+                  "source",
+                  "year",
+                  "volume",
+                  "issue",
+                  "pagination",
+                  "to.doi",
+                  "publication_id",
+                  "times_cited")
+
+direct.citation <- final.dt %>%
+  .[, .(citing_id, cited_references, citing_model, title, doi, pub_year, from.authors)] %>%
+  separate_rows(cited_references, sep = ";(?=\\[)") %>%
+  separate(col = cited_references, into = column_names, sep = "\\|") %>%
+  data.table() %>%
+  setnames(., "authors", "to.authors")
+
+# ARRANGE DATA FOR NETWORK CITATION ANALYSIS ###################################
+
+# Create a directed graph from the dataset
+edges <- data.table(from = direct.citation$citing_id, 
+                    to = direct.citation$publication_id, 
+                    from.model = direct.citation$citing_model, 
+                    year = direct.citation$year, 
+                    n.citations = direct.citation$times_cited, 
+                    to.doi = direct.citation$to.doi, 
+                    to.authors = direct.citation$to.authors)
+
+# Merge data from citing papers with data from cited papers
+network.dt <- merge(edges, final.dt[, .(citing_id, doi, pub_year, times_cited, from.authors)], 
+                    by.x = "from", by.y = "citing_id")
+
+colnames(network.dt)
+
+# Change column names to clarify
+new_colnames <- c("from", "to", "from.model", "to.year", "to.n.citations",
+                  "to.doi", "to.authors", "from.doi", "from.year", "from.n.citations", "from.authors")
+
+setnames(network.dt, colnames(network.dt), new_colnames)
+
+# Reorder columns
+setcolorder(network.dt, c("from", "to", "from.year", "to.year", "from.authors", 
+                          "to.authors", "from.n.citations", "to.n.citations", 
+                          "from.doi", "to.doi", "from.model"))
+
+# Remove square brackets from the to.authors column
+network.dt[, to.authors:= gsub("\\[|\\]", "", to.authors)]
+
+# Identify the model of the cited paper
+tmp <- network.dt[, .(from.model, from)] %>%
+  unique()
+setkey(tmp, "from")
+
+# Define parallel computing
+cl <- makeCluster(floor(detectCores() * 0.75))
+registerDoParallel(cl)
+
+# Search in parallel
+to.model <- foreach(i=1:nrow(network.dt),
+             .packages = "data.table", 
+             .combine = "c") %dopar%
+  {
+    tmp[network.dt[[i, "to"]]]$from.model
+  }
+
+# Stop parallel cluster
+stopCluster(cl)
+
+# Add vector of model names
+network.dt[, to.model:= to.model]
+
+# Turn some columns into numeric
+columns_to_modify <- grep("citation", names(network.dt), value = TRUE)
+network.dt[, (columns_to_modify):= lapply(.SD, as.numeric), .SDcols = columns_to_modify]
+
+# Export dataset
+fwrite(network.dt, "network.dt.csv")
+```
+
+```{r plot_citations, dependson="extract_citations"}
+
+# PLOT DESCRIPTIVE FIGURES #####################################################
+
+plot.n.citing <- network.dt[, unique(from.n.citations), from] %>%
+  ggplot(., aes(V1)) +
+  geom_histogram(color = "black", fill = "grey") + 
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^(2 * x)),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme_AP() + 
+  labs(x = "Citations", y = "Nº papers") + 
+  ggtitle("Citing")
+
+plot.n.citing
+
+plot.n.cited <- network.dt[, unique(to.n.citations), to] %>%
+  ggplot(., aes(V1)) +
+  geom_histogram() + 
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^(2 * x)),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  geom_histogram(color = "black", fill = "grey") + 
+  theme_AP() + 
+  labs(x = "Citations", y = "") +
+  ggtitle("Cited")
+
+plot.n.cited
+```
+
+```{r community_citation, dependson="extract_citations", fig.width=4, fig.height=4}
+
+# CHECK WHETHER WATER MODEL COMMUNITIES CITE THEIR OWN MODEL THE MOST ##########
+
+da <- network.dt[, .N, .(from.model, to.model)] %>%
+  .[!is.na(to.model)] 
+
+keycol <-c("from.model","N")
+setorderv(da, keycol, order = -1)
+dcast(da, from.model~to.model, value.var = "N")
+
+# Identify which model is the most cited
+largest.citation <- da[da[, .I[N == max(N)], from.model]$V1]
+sum(largest.citation$from.model == largest.citation$to.model) / nrow(largest.citation) 
+
+da[, N:= log2(N)]
+
+# Tile plot
+ggplot(da, aes(x = from.model, y = to.model, fill = N))+
+  geom_tile(col = "black") +
+  scale_fill_viridis(name = "log$_2$(citations)") + 
+  theme_AP() +
+  theme(legend.position = "top") +
+  labs(x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r number_citations, dependson="extract_citations", warning=FALSE}
+
+# DISTRIBUTION OF CITATIONS PER MODEL ##########################################
+
+from.vec <- unique(network.dt$from)
+to.vec <- unique(network.dt$to)
+
+total.per.model <- network.dt[, unique(from), from.model] %>%
+  .[, .(total = .N), from.model]
+
+plot.total <- network.dt[, unique(from), .(from.model, from.n.citations)] %>%
+  .[, sum(from.n.citations), from.model] %>%
+  merge(., total.per.model, by = "from.model") %>%
+  .[, normalized:= V1 / total] %>%
+  ggplot(., aes(reorder(from.model, normalized), normalized)) +
+  geom_bar(stat = "identity", color = "black", fill = "grey") + 
+  coord_flip() + 
+  theme_AP() +
+  labs(y = "Citations / Nº papers", x = "") +
+  theme(axis.text.y = element_text(size = 6))
+
+plot.total
+
+plot.total.model <- network.dt[, unique(from), .(from.model, from.n.citations)] %>%
+  ggplot(., aes(from.n.citations)) +
+  geom_histogram() +
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^(2 * x)),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  facet_wrap(~from.model) + 
+  labs(x = "Citations", y = "Nº papers") +
+  theme_AP()
+
+plot.total.model
+```
+
+```{r merge_complex_figure, dependson="number_citations", fig.height=6, fig.width=5, warning=FALSE}
+
+# MERGE PLOTS ##################################################################
+
+top <- plot_grid(plot.n.citing, plot.n.cited, plot.total, 
+                 ncol = 3, labels = "auto", rel_widths = c(0.3, 0.3, 0.4))
+
+plot_grid(top, plot.total.model, ncol = 1, rel_heights = c(0.3, 0.7), 
+          labels = c("", "d"))
+```
+
+\newpage
+
+```{r session}
+
+# SESSION INFORMATION ##########################################################
+
+sessionInfo()
+
+## Return the machine CPU
+cat("Machine:     "); print(get_cpu()$model_name)
+
+## Return number of true cores
+cat("Num cores:   "); print(detectCores(logical = FALSE))
+
+## Return number of threads
+cat("Num threads: "); print(detectCores(logical = FALSE))
 ```

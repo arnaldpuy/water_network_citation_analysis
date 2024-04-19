@@ -22,10 +22,10 @@ theme_AP <- function() {
           legend.box.margin = margin(0.2,-4,-7,-7), 
           plot.margin = margin(3, 4, 0, 4), 
           legend.text = element_text(size = 8), 
-          axis.title = element_text(size = 10),
+          axis.title = element_text(size = 8.5),
           legend.key.width = unit(0.4, "cm"), 
           legend.key.height = unit(0.4, "cm"), 
-          legend.title = element_text(size = 9)) 
+          legend.title = element_text(size = 8.5)) 
 }
 
 # Function to identify rows with NA
@@ -62,6 +62,7 @@ for (i in 1:length(water.models)) {
 
 names(dt) <- water.models
 dt.water <- rbindlist(dt, idcol = "Model")
+rm(dt)
 
 wos.dt <- fread("final.dt.csv")
 wos.titles <- wos.dt[Model %in% water.models]
@@ -230,21 +231,21 @@ fwrite(network.dt, "network.dt.csv")
 plot.n.citing <- network.dt[, unique(from.n.citations), from] %>%
   ggplot(., aes(V1)) +
   geom_histogram(color = "black", fill = "grey") + 
-  scale_x_log10() +
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^(2 * x)),
+                labels = scales::trans_format("log10", scales::math_format(10^.x)))
   theme_AP() + 
-  labs(x = "Citations", y = "Counts")
+  labs(x = "Citations", y = "Counts") + 
+  ggtitle("Citing")
 
 plot.n.cited <- network.dt[, unique(to.n.citations), to] %>%
   ggplot(., aes(V1)) +
   geom_histogram() + 
-  scale_x_log10() +
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
   geom_histogram(color = "black", fill = "grey") + 
   theme_AP() + 
-  labs(x = "Citations", y = "")
-
-da <- list(plot.n.cited, plot.n.citing) 
-
-plot_grid(plotlist = da, ncols = 2, labels = "auto")
+  labs(x = "Citations", y = "") +
+  ggtitle("Cited")
 
 # CHECK WHETHER WATER MODEL COMMUNITIES CITE THEIR OWN MODEL THE MOST ##########
 
@@ -258,6 +259,8 @@ dcast(da, from.model~to.model, value.var = "N")
 # Identify which model is the most cited
 largest.citation <- da[da[, .I[N == max(N)], from.model]$V1]
 sum(largest.citation$from.model == largest.citation$to.model) / nrow(largest.citation) 
+
+da[, N:= log2(N)]
 
 # Tile plot
 ggplot(da, aes(x = from.model, y = to.model, fill = N))+
@@ -274,6 +277,184 @@ merge(da[, .(maxima = max(N)), from.model],
   data.table() %>%
   .[, diff:= maxima / second.largest] %>%
   print()
+
+# DISTRIBUTION OF CITATIONS PER MODEL ##########################################
+
+from.vec <- unique(network.dt$from)
+to.vec <- unique(network.dt$to)
+
+total.per.model <- network.dt[, unique(from), from.model] %>%
+  .[, .(total = .N), from.model]
+
+plot.total <- network.dt[, unique(from), .(from.model, from.n.citations)] %>%
+  .[, sum(from.n.citations), from.model] %>%
+  merge(., total.per.model, by = "from.model") %>%
+  .[, normalized:= V1 / total] %>%
+  ggplot(., aes(reorder(from.model, normalized), normalized)) +
+  geom_bar(stat = "identity", color = "black", fill = "grey") + 
+  coord_flip() + 
+  theme_AP() +
+  labs(y = "Citations / Nº papers", x = "") +
+  theme(axis.text.y = element_text(size = 6))
+
+plot.total
+
+plot.total.model <- network.dt[, unique(from), .(from.model, from.n.citations)] %>%
+  ggplot(., aes(from.n.citations)) +
+  geom_histogram() +
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+                labels = trans_format("log10", math_format(10^.x))) +
+  facet_wrap(~from.model) + 
+  labs(x = "Citations", y = "Counts") +
+  theme_AP()
+
+plot.total.model
+
+# Merge ----------------------------------
+
+top <- plot_grid(plot.n.citing, plot.n.cited, plot.total, ncol = 3, labels = "auto", 
+          rel_widths = c(0.3, 0.3, 0.4))
+
+plot_grid(top, plot.total.model, ncol = 1, rel_heights = c(0.3, 0.7), 
+          labels = c("", "d"))
+
+
+########################
+########################
+
+# CALCULATE NETWORK METRICS ####################################################
+
+# Transform to graph -----------------------------------------------------------
+
+citation_graph <- graph_from_data_frame(d = network.dt, directed = TRUE)
+
+# Calculate network metrics ----------------------------------------------------
+
+edge_density(citation_graph)
+
+# Modularity: 
+# - c.1: Strong community structure, where nodes within groups are highly connected.
+# - c. -1: Opposite of community structure, where nodes between groups are more connected.
+# - c. 0: Indicates absence of community structure or anti-community structure in the network.
+wtc <- cluster_walktrap(citation_graph)
+modularity(wtc)
+
+network_metrics <- data.table(node = V(citation_graph)$name,
+                              
+                              # Degree of a node: The number of connections or 
+                              # edges linked to that node. 
+                              # It represents how well-connected or central a 
+                              # node is within the graph.
+                              degree = degree(citation_graph, mode = "in"),
+                              
+                              # Betweenness centrality of a node: Measures the 
+                              # extent to which a node lies on the shortest 
+                              # paths between all pairs of other nodes in the graph. 
+                              # Nodes with high betweenness centrality act as 
+                              # bridges or intermediaries, facilitating 
+                              # communication and information flow between other nodes.
+                              betweenness = betweenness(citation_graph),
+                              
+                              # Closeness centrality of a node: Measures how 
+                              # close a node is to all other nodes in the graph, 
+                              # taking into account the length of the shortest paths. 
+                              # Nodes with high closeness centrality are able to 
+                              # efficiently communicate or interact with other 
+                              # nodes in the graph.
+                              closeness = closeness(citation_graph),
+                              pagerank = page_rank(citation_graph)$vector
+)
+
+# Define the max number of rows
+max.number <- 3
+
+degree.nodes <- network_metrics[order(-degree)][1:max.number]
+betweenness.nodes <- network_metrics[order(-betweenness)][1:max.number]
+pagerank.nodes <- network_metrics[order(-closeness)][1:max.number]
+
+degree.nodes
+betweenness.nodes
+pagerank.nodes
+
+
+## ----add_features, dependson=c("read_all_datasets", "network_metrics")-----
+
+# ADD FEATURES TO NODES ########################################################
+
+# Retrieve a vector with the node names ----------------------------------------
+
+graph <- tidygraph::as_tbl_graph(network.dt, directed = TRUE) 
+vec.names <- graph %>%
+  activate(nodes) %>%
+  pull() %>%
+  data.table(name = .)
+
+# Merge with info from the network.dt ------------------------------------------
+
+from.to.model <- merge(merge(vec.names, unique(network.dt[, .(from, from.model)]), 
+                                by.x = "name", by.y = "from", all.x = TRUE), 
+                          unique(network.dt[, .(from, to.model)]), 
+                          by.x = "name", by.y = "from", all.x = TRUE)
+
+# Merge with the correct order -------------------------------------------------
+
+order_indices <- match(vec.names$name, from.to.model$name)
+final.vec.from.model <- from.to.model[order_indices, ] %>%
+  .[, from.model] 
+final.vec.to.model <- from.to.model[order_indices, ] %>%
+  .[, to.model] 
+
+# Attach to the graph ----------------------------------------------------------
+
+graph <- graph %>%
+  activate(nodes) %>%
+  mutate(from.model = final.vec.from.model, 
+         to.model = final.vec.to.model, 
+         degree = network_metrics$degree, 
+         betweenness = network_metrics$betweenness, 
+         pagerank = network_metrics$pagerank)
+
+
+graph %>%
+  activate(nodes) %>%
+  data.frame()
+
+# PLOT NETWORK #################################################################
+
+seed <- 123
+
+# by nature of claim -----------------------------------------------------------
+
+set.seed(seed)
+
+# Label the nodes with highest degree ------------------------------------------
+
+ggraph(graph, layout = "igraph", algorithm = "nicely") + 
+  geom_edge_link(arrow = arrow(length = unit(1.8, 'mm')), 
+                 end_cap = circle(1, "mm")) + 
+  geom_node_point(aes(color = from.model, size = degree)) +
+  geom_node_text(aes(label = ifelse(degree >= min(degree.nodes$degree), name, NA)), 
+                 repel = TRUE, size = 2.2) +
+  labs(x = "", y = "") +
+  theme_AP() + 
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        legend.position = "right") 
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # NETWORK CO-CITATION ANALYSIS #################################################
 
